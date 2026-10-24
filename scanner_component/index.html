@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  body { margin:0; font-family: Tahoma, Arial, sans-serif; background:transparent; }
+  #bar { display:flex; gap:8px; margin-bottom:8px; }
+  button { flex:1; padding:12px; font-size:16px; border:0; border-radius:8px; cursor:pointer; background:#1a73e8; color:#fff; }
+  button.alt { background:#5f6368; flex:0 0 auto; }
+  #reader { width:100%; border-radius:10px; overflow:hidden; background:#111; min-height:60px; }
+  #msg { margin-top:8px; padding:12px; border-radius:8px; font-size:18px; background:#f1f3f4; color:#202124; min-height:24px; }
+  .ok  { background:#e6f4ea !important; border-right:6px solid #1e8e3e; }
+  .dup { background:#fef7e0 !important; border-right:6px solid #f9ab00; }
+  .bad { background:#fce8e6 !important; border-right:6px solid #d93025; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="startBtn">▶ تشغيل الكاميرا</button>
+  <button id="flipBtn" class="alt" style="display:none">🔄</button>
+</div>
+<div id="reader"></div>
+<div id="msg">وجّه الكاميرا نحو الباركود، سيُسجَّل الحضور تلقائياً.</div>
+
+<script>
+// ---- بروتوكول Streamlit للمكوّنات المخصصة (بدون أي أدوات بناء)
+function send(type, data) {
+  window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
+}
+function setValue(v) { send("streamlit:setComponentValue", { value: v, dataType: "json" }); }
+function setHeight(h) { send("streamlit:setFrameHeight", { height: h }); }
+
+var names = {};
+var done = {};
+var scans = [];                       // آخر المسحات (تُرسل كلها كي لا يضيع أي مسح)
+var nonce = Math.random().toString(36).slice(2, 8);
+var counter = 0, lastCode = "", lastTime = 0;
+var scanner = null, facing = "environment", running = false;
+
+function norm(s) {
+  s = String(s).trim();
+  if (/^\d+\.0+$/.test(s)) s = s.split(".")[0];
+  return s.replace(/\s+/g, "").toUpperCase();
+}
+
+function beep(ok) {
+  try {
+    var C = window.AudioContext || window.webkitAudioContext;
+    var a = new C(), o = a.createOscillator(), g = a.createGain();
+    o.connect(g); g.connect(a.destination);
+    o.frequency.value = ok ? 880 : 300; g.gain.value = 0.15;
+    o.start(); setTimeout(function () { o.stop(); a.close(); }, ok ? 120 : 300);
+  } catch (e) {}
+}
+
+function show(cls, html) {
+  var m = document.getElementById("msg");
+  m.className = cls; m.innerHTML = html;
+}
+
+function onScan(text) {
+  var now = Date.now();
+  var code = norm(text);
+  if (!code) return;
+  if (code === lastCode && now - lastTime < 4000) { lastTime = now; return; }  // تجاهل التكرار المتتابع
+  lastCode = code; lastTime = now;
+
+  counter += 1;
+  scans.push({ id: nonce + "-" + counter, code: String(text), ts: now });
+  if (scans.length > 40) scans.shift();
+  setValue({ scans: scans });
+
+  // ردّ فوري على الشاشة (القرار النهائي يُسجَّل في Python)
+  if (!(code in names)) { beep(false); show("bad", "❌ باركود غير موجود: <b>" + code + "</b>"); }
+  else if (done[code]) { beep(false); show("dup", "⚠️ <b>" + names[code] + "</b> مسجَّل مسبقاً"); }
+  else { done[code] = true; beep(true); show("ok", "✅ <b>" + names[code] + "</b>"); }
+}
+
+function startCam() {
+  if (typeof Html5Qrcode === "undefined") { show("bad", "تعذّر تحميل مكتبة القراءة، تأكد من الاتصال بالإنترنت."); return; }
+  if (!scanner) {
+    var F = Html5QrcodeSupportedFormats;
+    scanner = new Html5Qrcode("reader", {
+      formatsToSupport: [F.QR_CODE, F.CODE_128, F.CODE_39, F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.ITF],
+      useBarCodeDetectorIfSupported: true,
+      verbose: false
+    });
+  }
+  scanner.start(
+    { facingMode: facing },
+    { fps: 12, qrbox: function (w, h) { return { width: Math.floor(w * 0.9), height: Math.floor(Math.min(h * 0.7, 220)) }; } },
+    onScan,
+    function () {}
+  ).then(function () {
+    running = true;
+    document.getElementById("startBtn").style.display = "none";
+    document.getElementById("flipBtn").style.display = "";
+    setHeight(document.body.scrollHeight + 20);
+    setTimeout(function () { setHeight(document.body.scrollHeight + 20); }, 800);
+  }).catch(function (e) {
+    show("bad", "تعذّر تشغيل الكاميرا: " + e + "<br>اسمح بالوصول للكاميرا من إعدادات المتصفح (يجب أن يكون الرابط https).");
+  });
+}
+
+document.getElementById("startBtn").onclick = startCam;
+document.getElementById("flipBtn").onclick = function () {
+  if (!scanner || !running) return;
+  scanner.stop().then(function () {
+    running = false; facing = facing === "environment" ? "user" : "environment"; startCam();
+  });
+};
+
+window.addEventListener("message", function (e) {
+  if (!e.data || e.data.type !== "streamlit:render") return;
+  var a = e.data.args || {};
+  names = a.names || {};
+  done = {};
+  (a.done || []).forEach(function (c) { done[c] = true; });
+});
+
+send("streamlit:componentReady", { apiVersion: 1 });
+setHeight(130);
+</script>
+</body>
+</html>
